@@ -1,0 +1,1 @@
+The nicest bit of code to show the implementation of the Covering stack is _CoveringStackRegressor. The rest is just essentially copy paste for APIs sake.

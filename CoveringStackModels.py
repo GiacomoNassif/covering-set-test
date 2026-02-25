@@ -57,8 +57,8 @@ class _BaseCoveringStack(BaseEstimator):
                 self.route[frozenset((i, j))] = m
 
         self.M = len(self.blocks)
-        self.l1_models = [None] * self.M
-        self.l2_models = [None] * (self.v + 1)
+        self.l1_models = [[None] * len(self.l1_estimator) for _ in range(self.M)]
+        self.l2_models = [[None] * len(self.l2_estimator) for _ in range(self.v + 1)]
 
     def _model_output(self, est, X):
         raise NotImplementedError
@@ -75,16 +75,17 @@ class _BaseCoveringStack(BaseEstimator):
         for f, (_, te) in enumerate(splitter.split(X, y), start=1):
             self.fold_rows_[f] = te
 
-        self.l1_oof_ = np.full((n, self.M, 1), np.nan, dtype=float)
+        self.l1_oof_ = np.full((n, self.M, len(self.l1_estimator)), np.nan, dtype=float)
         all_folds = set(range(1, self.v + 1))
         for m, block in enumerate(self.blocks):
             tr_idx = self._rows(all_folds - block)
             te_idx = self._rows(block)
-            l1 = clone(self.l1_estimator).fit(X[tr_idx], y[tr_idx])
-            self.l1_models[m] = l1
-            self.l1_oof_[te_idx, m, 0] = self._model_output(l1, X[te_idx])
+            for l, l1_est in enumerate(self.l1_estimator):
+                l1 = clone(l1_est).fit(X[tr_idx], y[tr_idx])
+                self.l1_models[m][l] = l1
+                self.l1_oof_[te_idx, m, l] = self._model_output(l1, X[te_idx])
 
-        self.oof_ = np.full(n, np.nan, dtype=float)
+        self.oof_ = np.full((n, len(self.l2_estimator)), np.nan, dtype=float)
         for i in range(1, self.v + 1):
             train_folds = [j for j in range(1, self.v + 1) if j != i]
             train_rows = self._rows(train_folds)
@@ -93,42 +94,53 @@ class _BaseCoveringStack(BaseEstimator):
                 for j in train_folds
             ])
 
-            l2 = clone(self.l2_estimator).fit(np.hstack([X[train_rows], z_train]), y[train_rows])
-            self.l2_models[i] = l2
+            for r, l2_est in enumerate(self.l2_estimator):
+                l2 = clone(l2_est).fit(np.hstack([X[train_rows], z_train]), y[train_rows])
+                self.l2_models[i][r] = l2
 
             test_rows = self.fold_rows_[i]
             z_test = self.l1_oof_[test_rows, self.test_l1[i]]
-            self.oof_[test_rows] = self._model_output(l2, np.hstack([X[test_rows], z_test]))
+            self.oof_[test_rows] = np.column_stack([
+                self._model_output(l2, np.hstack([X[test_rows], z_test]))
+                for l2 in self.l2_models[i]
+            ])
 
         return self
 
     def _predict_raw(self, X):
         check_is_fitted(self, ["l1_oof_", "oof_", "fold_rows_"])
-        return self.predict_uniform_and_routed_mean(X)[0] # uniform mean
+        return self.predict_uniform_and_routed_mean(X)[0]  # uniform mean
 
     def predict_uniform_and_routed_mean(self, X):
         """
         uniform_mean:
             (1/K) * sum_i (1/M) * sum_m P[i,m](x)
-    
+
         routed_mean:
             (1/K) * sum_i sum_m w_i[m] * P[i,m](x),
             w_i[m] ∝ sum_{j != i, route(i,j)=m} |fold_j|, normalized over m.
         """
         check_is_fitted(self, ["fold_rows_"])
-    
+
         X = np.asarray(X)
         n, p = X.shape
         K, M = self.v, self.M
-    
-        Z = np.column_stack([self._model_output(l1, X) for l1 in self.l1_models])
-    
-        uniform_sum = np.zeros(n)
-        routed_sum = np.zeros(n)
-    
-        Xz = np.empty((n, p + 1))
+        R = len(self.l2_estimator)
+
+        Z = np.stack(
+            [
+                np.column_stack([self._model_output(l1, X) for l1 in l1_group])
+                for l1_group in self.l1_models
+            ],
+            axis=1,
+        )
+
+        uniform_sum = np.zeros((n, R))
+        routed_sum = np.zeros((n, R))
+
+        Xz = np.empty((n, p + Z.shape[2]))
         Xz[:, :p] = X
-    
+
         for i in range(1, K + 1):
             w = np.zeros(M)
             for j in range(1, K + 1):
@@ -137,16 +149,16 @@ class _BaseCoveringStack(BaseEstimator):
                 m = self.route[frozenset((i, j))]
                 w[m] += len(self.fold_rows_[j])
             w /= w.sum()
-    
+
             l2 = self.l2_models[i]
             for m in range(M):
-                Xz[:, -1] = Z[:, m]
-                p_im = self._model_output(l2, Xz)
+                Xz[:, p:] = Z[:, m, :]
+                p_im = np.column_stack([self._model_output(l2_model, Xz) for l2_model in l2])
                 uniform_sum += p_im
                 routed_sum += w[m] * p_im
 
         l1_pred = Z.mean(axis=1)
-        
+
         return uniform_sum / (K * M), routed_sum / K, l1_pred
 
 
@@ -211,7 +223,7 @@ class CoveringStackClassifier(_BaseCoveringStack, ClassifierMixin):
 
     def predict_proba(self, X):
         p = self._predict_raw(X)
-        return np.column_stack([1.0 - p, p])
+        return np.stack([1.0 - p, p], axis=1)
 
     def predict(self, X):
         p = self._predict_raw(X)

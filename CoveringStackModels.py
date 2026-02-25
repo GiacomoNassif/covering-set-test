@@ -58,7 +58,7 @@ class _BaseCoveringStack(BaseEstimator):
 
         self.M = len(self.blocks)
         self.l1_models = [None] * self.M
-        self.l2_models = {}
+        self.l2_models = [None] * (self.v + 1)
 
     def _model_output(self, est, X):
         raise NotImplementedError

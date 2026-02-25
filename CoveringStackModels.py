@@ -104,12 +104,50 @@ class _BaseCoveringStack(BaseEstimator):
 
     def _predict_raw(self, X):
         check_is_fitted(self, ["l1_oof_", "oof_", "fold_rows_"])
-        preds = []
-        for i in range(1, self.v + 1):
-            m = self.test_l1[i]
-            z = self._model_output(self.l1_models[m], X).reshape(-1, 1)
-            preds.append(self._model_output(self.l2_models[i], np.hstack([X, z])))
-        return np.mean(np.vstack(preds), axis=0)
+        return self.predict_uniform_and_routed_mean(X)[0] # uniform mean
+
+    def predict_uniform_and_routed_mean(self, X):
+        """
+        uniform_mean:
+            (1/K) * sum_i (1/M) * sum_m P[i,m](x)
+    
+        routed_mean:
+            (1/K) * sum_i sum_m w_i[m] * P[i,m](x),
+            w_i[m] ∝ sum_{j != i, route(i,j)=m} |fold_j|, normalized over m.
+        """
+        check_is_fitted(self, ["fold_rows_"])
+    
+        X = np.asarray(X)
+        n, p = X.shape
+        K, M = self.v, self.M
+    
+        Z = np.column_stack([self._model_output(l1, X) for l1 in self.l1_models])
+    
+        uniform_sum = np.zeros(n)
+        routed_sum = np.zeros(n)
+    
+        Xz = np.empty((n, p + 1))
+        Xz[:, :p] = X
+    
+        for i in range(1, K + 1):
+            w = np.zeros(M)
+            for j in range(1, K + 1):
+                if j == i:
+                    continue
+                m = self.route[frozenset((i, j))]
+                w[m] += len(self.fold_rows_[j])
+            w /= w.sum()
+    
+            l2 = self.l2_models[i]
+            for m in range(M):
+                Xz[:, -1] = Z[:, m]
+                p_im = self._model_output(l2, Xz)
+                uniform_sum += p_im
+                routed_sum += w[m] * p_im
+
+        l1_pred = Z.mean(axis=1)
+        
+        return uniform_sum / (K * M), routed_sum / K, l1_pred
 
 
 class CoveringStackRegressor(_BaseCoveringStack, RegressorMixin):
